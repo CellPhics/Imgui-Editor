@@ -1,0 +1,7 @@
+build/
+*.tmp
+
+# Personal menu projects and editor scratch files
+Menus/
+.bridge/
+export/
