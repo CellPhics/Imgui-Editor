@@ -1,4 +1,4 @@
-// mm_widgets — see mm_widgets.h
+// mm_widgets - see mm_widgets.h for what everything does.
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
@@ -12,9 +12,10 @@
 
 namespace mm {
 
-static Theme       g_theme;
-static ImGuiStorage g_anim;
-static ImGuiID     g_listening_key = 0;
+static Theme g_theme;
+static ImGuiStorage g_anim_values;     // Animate() state, keyed by id
+static ImGuiID g_listening_keybind = 0; // the keybind waiting for a key press
+static ImVector<bool> g_label_stack;   // did LabelAbove() push an item width?
 
 Theme& GetTheme() { return g_theme; }
 
@@ -23,14 +24,17 @@ ImVec4 LerpColor(const ImVec4& a, const ImVec4& b, float t)
     return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
 }
 
+// Exponential smoothing: covers the same fraction of the distance every
+// second no matter the frame rate.
 static float AnimateFrom(ImGuiID id, float target, float initial, float speed_mul)
 {
-    float* v = g_anim.GetFloatRef(id, FLT_MAX);
-    if (*v == FLT_MAX)
-        *v = initial;
-    if (!g_theme.animations) { *v = target; return target; }
-    float dt = ImGui::GetIO().DeltaTime;
-    float k = 1.0f - expf(-g_theme.anim_speed * speed_mul * dt);
+    float* v = g_anim_values.GetFloatRef(id, FLT_MAX);
+    if (*v == FLT_MAX) *v = initial; // first time we see this id
+    if (!g_theme.animations) {
+        *v = target;
+        return target;
+    }
+    const float k = 1.0f - expf(-g_theme.anim_speed * speed_mul * ImGui::GetIO().DeltaTime);
     *v += (target - *v) * k;
     if (fabsf(target - *v) < 0.001f) *v = target;
     return *v;
@@ -38,9 +42,7 @@ static float AnimateFrom(ImGuiID id, float target, float initial, float speed_mu
 
 float Animate(ImGuiID id, float target, float speed_mul) { return AnimateFrom(id, target, target, speed_mul); }
 
-void ResetAnimations() { g_anim.Clear(); }
-
-static ImVector<bool> g_label_stack;
+void ResetAnimations() { g_anim_values.Clear(); }
 
 const char* LabelAbove(const char* label, bool full_width)
 {
@@ -52,9 +54,10 @@ const char* LabelAbove(const char* label, bool full_width)
     ImGui::TextUnformatted(label, vis_end);
     ImGui::PushItemWidth(full_width ? -FLT_MIN : ImGui::CalcItemWidth());
     if (hash) return hash;
-    static char buf[8][256];
-    static int idx = 0;
-    char* b = buf[idx++ & 7];
+    // no ## in the label: make one so the widget doesn't draw the label a second time
+    static char buffers[8][256];
+    static int next = 0;
+    char* b = buffers[next++ & 7];
     snprintf(b, 256, "##%s", label);
     return b;
 }
@@ -68,20 +71,25 @@ void LabelAboveEnd()
 
 const char* IconLabel(const char* icon, const char* label)
 {
-    static char bufs[8][512];
-    static int  idx = 0;
-    char* b = bufs[idx++ & 7];
+    // a few rotating buffers so you can use it more than once in one expression
+    static char buffers[8][512];
+    static int next = 0;
+    char* b = buffers[next++ & 7];
     if (icon && icon[0] && label && label[0]) snprintf(b, 512, "%s  %s", icon, label);
     else if (icon && icon[0])                 snprintf(b, 512, "%s", icon);
     else                                      snprintf(b, 512, "%s", label ? label : "");
     return b;
 }
 
+// ImVec4 -> ImU32, respecting style.Alpha (so fades and BeginDisabled work)
 static ImU32 Col(const ImVec4& c, float alpha_mul = 1.0f)
 {
-    ImVec4 v = c; v.w *= alpha_mul * ImGui::GetStyle().Alpha;
+    ImVec4 v = c;
+    v.w *= alpha_mul * ImGui::GetStyle().Alpha;
     return ImGui::ColorConvertFloat4ToU32(v);
 }
+
+// ---------------------------------------------------------------- toggle / checkbox
 
 bool Toggle(const char* label, bool* v)
 {
@@ -107,11 +115,11 @@ bool Toggle(const char* label, bool* v)
     bool pressed = ButtonBehavior(bb, id, &hovered, &held);
     if (pressed) { *v = !*v; MarkItemEdited(id); }
 
-    const float t = Animate(id, *v ? 1.0f : 0.0f);
-    const float ht = Animate(id + 1, hovered ? 1.0f : 0.0f);
+    const float t = Animate(id, *v ? 1.0f : 0.0f);         // 0 = off, 1 = on
+    const float hover = Animate(id + 1, hovered ? 1.0f : 0.0f);
     ImDrawList* dl = window->DrawList;
 
-    ImVec2 sw_pos;
+    ImVec2 sw_pos;   // where the switch goes
     ImVec2 text_pos;
     if (g_theme.toggle_right && label_size.x > 0) {
         sw_pos = ImVec2(bb.Max.x - w, pos.y + (fh - h) * 0.5f);
@@ -121,11 +129,11 @@ bool Toggle(const char* label, bool* v)
         text_pos = ImVec2(pos.x + w + style.ItemInnerSpacing.x, pos.y + style.FramePadding.y);
     }
     ImVec4 off = g_theme.toggle_off;
-    off = LerpColor(off, ImVec4(off.x + 0.08f, off.y + 0.08f, off.z + 0.08f, off.w), ht);
+    off = LerpColor(off, ImVec4(off.x + 0.08f, off.y + 0.08f, off.z + 0.08f, off.w), hover); // a bit lighter on hover
     dl->AddRectFilled(sw_pos, sw_pos + ImVec2(w, h), Col(LerpColor(off, g_theme.accent, t)), h * 0.5f);
     const float r = h * 0.5f - 2.5f;
     const ImVec2 knob(sw_pos.x + 2.5f + r + t * (w - 2 * r - 5.0f), sw_pos.y + h * 0.5f);
-    dl->AddCircleFilled(knob + ImVec2(0, 1), r, Col(ImVec4(0, 0, 0, 0.25f)));
+    dl->AddCircleFilled(knob + ImVec2(0, 1), r, Col(ImVec4(0, 0, 0, 0.25f))); // tiny shadow
     dl->AddCircleFilled(knob, r, Col(ImVec4(1, 1, 1, 1)));
     if (label_size.x > 0)
         RenderText(text_pos, label);
@@ -160,18 +168,20 @@ bool CheckboxEx(const char* label, bool* v, int style, float box_size)
     dl->AddRectFilled(box.Min, box.Max, frame, r);
     if (st.FrameBorderSize > 0) dl->AddRect(box.Min, box.Max, GetColorU32(ImGuiCol_Border), r, 0, st.FrameBorderSize);
     if (t > 0.01f) {
-        const float pad = sz * 0.15f * (1.0f - t); // grows in as it turns on
+        // tiny boxes get filled edge to edge, bigger ones get a gap that shrinks as it turns on
         const float inset = box_size > 0 && box_size < 10 ? 0.0f : ImMax(2.0f, IM_TRUNC(sz * 0.18f));
+        const float grow = inset > 0 ? sz * 0.15f * (1.0f - t) : 0.0f;
         ImVec4 c = GetStyleColorVec4(ImGuiCol_CheckMark);
         c.w *= t;
-        const float pd = inset > 0 ? pad : 0.0f;
-        const ImVec2 a = box.Min + ImVec2(inset + pd, inset + pd), b = box.Max - ImVec2(inset + pd, inset + pd);
+        const ImVec2 a = box.Min + ImVec2(inset + grow, inset + grow), b = box.Max - ImVec2(inset + grow, inset + grow);
         if (circle) dl->AddCircleFilled((a + b) * 0.5f, (b.x - a.x) * 0.5f, ColorConvertFloat4ToU32(c));
         else dl->AddRectFilled(a, b, ColorConvertFloat4ToU32(c), ImMax(0.0f, r - inset * 0.5f));
     }
     if (label_size.x > 0) RenderText(ImVec2(box.Max.x + st.ItemInnerSpacing.x, pos.y + st.FramePadding.y), label);
     return pressed;
 }
+
+// ---------------------------------------------------------------- sliders
 
 template <typename T>
 static bool SliderEx(const char* label, T* v, T v_min, T v_max, const char* format, int style, float track_height, bool markers)
@@ -205,17 +215,18 @@ static bool SliderEx(const char* label, T* v, T v_min, T v_max, const char* form
     ItemSize(bb, style == SliderStyle_Filled ? st.FramePadding.y : 0.0f);
     if (!ItemAdd(bb, id)) return false;
     bool hovered, held;
+    // simple drag handling: while held, the value follows the mouse x along the track
     ButtonBehavior(bb, id, &hovered, &held, ImGuiButtonFlags_PressedOnClick);
     bool changed = false;
     if (held && v_max != v_min) {
-        float t = ImSaturate((GetIO().MousePos.x - track.Min.x) / ImMax(1.0f, track.GetWidth()));
+        const float t = ImSaturate((GetIO().MousePos.x - track.Min.x) / ImMax(1.0f, track.GetWidth()));
         T nv;
         if constexpr (std::is_integral_v<T>) nv = (T)ImFloor(v_min + (v_max - v_min) * t + 0.5f);
         else nv = (T)(v_min + (v_max - v_min) * t);
         if (nv != *v) { *v = nv; changed = true; MarkItemEdited(id); }
     }
     const float frac = v_max == v_min ? 0.0f : ImSaturate((float)(*v - v_min) / (float)(v_max - v_min));
-    const float af = Animate(id, frac, 2.0f);
+    const float af = Animate(id, frac, 2.0f); // animated fill so jumps slide instead of snapping
     ImDrawList* dl = window->DrawList;
     snprintf(value_buf, sizeof(value_buf), format, *v);
     if (markers && style != SliderStyle_Filled) {
@@ -271,6 +282,8 @@ bool SliderIntEx(const char* label, int* v, int v_min, int v_max, const char* fo
     return SliderEx<int>(label, v, v_min, v_max, format, style, track_height, markers);
 }
 
+// ---------------------------------------------------------------- rect / keybind / multi combo
+
 void Rect(ImVec2 size, ImVec4 col, ImVec4 col2, bool vertical, float rounding)
 {
     using namespace ImGui;
@@ -286,7 +299,7 @@ void Rect(ImVec2 size, ImVec4 col, ImVec4 col2, bool vertical, float rounding)
         else dl->AddRectFilledMultiColor(a, b, c1, c2, c2, c1);
         return;
     }
-    // Rounded gradient: draw the rounded shape, then recolor its vertices.
+    // rounded gradient: draw the rounded shape, then recolor its vertices
     const int v0 = dl->VtxBuffer.Size;
     dl->AddRectFilled(a, b, c1, rounding);
     ShadeVertsLinearColorGradientKeepAlpha(dl, v0, dl->VtxBuffer.Size, a, vertical ? ImVec2(a.x, b.y) : ImVec2(b.x, a.y), c1, c2);
@@ -312,7 +325,7 @@ bool Keybind(const char* label, int* key)
     if (window->SkipItems) return false;
     const ImGuiID id = window->GetID(label);
     bool changed = false;
-    const bool listening = (g_listening_key == id);
+    const bool listening = g_listening_keybind == id;
 
     ImGui::BeginGroup();
     PushID(label);
@@ -331,15 +344,15 @@ bool Keybind(const char* label, int* key)
     }
     if (listening) PushStyleColor(ImGuiCol_Button, g_theme.accent);
     if (Button(btn, ImVec2(bw, 0)) && !listening)
-        g_listening_key = id;
+        g_listening_keybind = id;
     else if (listening) {
-        if (IsKeyPressed(ImGuiKey_Escape, false)) g_listening_key = 0;
-        else if (IsKeyPressed(ImGuiKey_Backspace, false) || IsKeyPressed(ImGuiKey_Delete, false)) { *key = ImGuiKey_None; changed = true; g_listening_key = 0; }
+        if (IsKeyPressed(ImGuiKey_Escape, false)) g_listening_keybind = 0;
+        else if (IsKeyPressed(ImGuiKey_Backspace, false) || IsKeyPressed(ImGuiKey_Delete, false)) { *key = ImGuiKey_None; changed = true; g_listening_keybind = 0; }
         else {
             for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; k++) {
                 if (k >= ImGuiKey_ReservedForModCtrl && k <= ImGuiKey_ReservedForModSuper) continue;
                 if (k == ImGuiKey_MouseLeft || (k >= ImGuiKey_MouseWheelX && k <= ImGuiKey_MouseWheelY)) continue;
-                if (IsKeyPressed((ImGuiKey)k, false)) { *key = k; changed = true; g_listening_key = 0; break; }
+                if (IsKeyPressed((ImGuiKey)k, false)) { *key = k; changed = true; g_listening_keybind = 0; break; }
             }
         }
     }
@@ -373,62 +386,65 @@ bool MultiCombo(const char* label, bool* values, const char* const items[], int 
     return changed;
 }
 
-// ---------------------------------------------------------------- Tabs
+// ---------------------------------------------------------------- tabs
+
 static ImRect TabButton(ImGuiID id, const ImVec2& pos, const ImVec2& size, bool* pressed, bool* hovered)
 {
     using namespace ImGui;
-    ImRect bb(pos, pos + size);
+    const ImRect bb(pos, pos + size);
     ItemSize(bb);
-    *pressed = false; *hovered = false;
+    *pressed = false;
+    *hovered = false;
     if (!ItemAdd(bb, id)) return bb;
     bool held;
     *pressed = ButtonBehavior(bb, id, hovered, &held);
     return bb;
 }
 
-// Size of a tab's icon/image + label block.
-static ImVec2 TabContentSize(const TabsOptions& o, const char* icon, const char* label, ImTextureID image, float* icon_w)
+// Measures what goes inside one tab: the icon (or image) and the label.
+struct TabContent {
+    ImVec2 icon, label, total;
+    bool has_label;
+};
+
+static TabContent MeasureTab(const TabsOptions& o, const char* icon, const char* label, ImTextureID image)
 {
     using namespace ImGui;
-    const bool has_label = !o.icon_only && label && label[0];
-    ImVec2 isz(0, 0);
-    if (image != ImTextureID_Invalid) isz = o.image_size.x > 0 ? o.image_size : ImVec2(o.icon_size > 0 ? o.icon_size : GetFontSize(), o.icon_size > 0 ? o.icon_size : GetFontSize());
-    else if (icon && icon[0]) {
-        const float fs = o.icon_size > 0 ? o.icon_size : GetFontSize();
-        isz = GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, icon);
-    }
-    *icon_w = isz.x;
-    const ImVec2 ls = has_label ? CalcTextSize(label) : ImVec2(0, 0);
-    if (o.layout == TabLayout_Stacked) return ImVec2(ImMax(isz.x, ls.x), isz.y + (has_label && isz.y > 0 ? 4.0f : 0.0f) + ls.y);
-    return ImVec2(isz.x + (has_label && isz.x > 0 ? 8.0f : 0.0f) + ls.x, ImMax(isz.y, ls.y));
+    TabContent c;
+    c.has_label = !o.icon_only && label && label[0];
+    const float icon_px = o.icon_size > 0 ? o.icon_size : GetFontSize();
+    c.icon = ImVec2(0, 0);
+    if (image != ImTextureID_Invalid) c.icon = o.image_size.x > 0 ? o.image_size : ImVec2(icon_px, icon_px);
+    else if (icon && icon[0]) c.icon = GetFont()->CalcTextSizeA(icon_px, FLT_MAX, 0.0f, icon);
+    c.label = c.has_label ? CalcTextSize(label) : ImVec2(0, 0);
+    const bool both = c.has_label && c.icon.x > 0;
+    if (o.layout == TabLayout_Stacked) c.total = ImVec2(ImMax(c.icon.x, c.label.x), c.icon.y + (both ? 4.0f : 0.0f) + c.label.y);
+    else c.total = ImVec2(c.icon.x + (both ? 8.0f : 0.0f) + c.label.x, ImMax(c.icon.y, c.label.y));
+    return c;
 }
 
 static void DrawTabContent(ImDrawList* dl, const ImRect& bb, const TabsOptions& o, const char* icon, const char* label,
-                           ImTextureID image, const ImVec4& col, bool center, float pad_x)
+                           ImTextureID image, const ImVec4& color, bool center, float pad_x)
 {
     using namespace ImGui;
-    float icon_w;
-    const ImVec2 cs = TabContentSize(o, icon, label, image, &icon_w);
-    const bool has_label = !o.icon_only && label && label[0];
-    ImVec2 p(center ? bb.Min.x + (bb.GetWidth() - cs.x) * 0.5f : bb.Min.x + pad_x, bb.Min.y + (bb.GetHeight() - cs.y) * 0.5f);
-    p = ImFloor(p);
-    const ImU32 c = Col(col);
-    ImVec2 isz(0, 0);
-    if (image != ImTextureID_Invalid) {
-        isz = o.image_size.x > 0 ? o.image_size : ImVec2(o.icon_size > 0 ? o.icon_size : GetFontSize(), o.icon_size > 0 ? o.icon_size : GetFontSize());
-        ImVec2 ip = o.layout == TabLayout_Stacked ? ImVec2(p.x + (cs.x - isz.x) * 0.5f, p.y) : ImVec2(p.x, p.y + (cs.y - isz.y) * 0.5f);
-        dl->AddImage(image, ip, ip + isz, ImVec2(0, 0), ImVec2(1, 1), o.tint_images ? c : Col(ImVec4(1, 1, 1, 1)));
-    } else if (icon && icon[0]) {
-        const float fs = o.icon_size > 0 ? o.icon_size : GetFontSize();
-        isz = GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, icon);
-        ImVec2 ip = o.layout == TabLayout_Stacked ? ImVec2(p.x + (cs.x - isz.x) * 0.5f, p.y) : ImVec2(p.x, p.y + (cs.y - isz.y) * 0.5f);
-        dl->AddText(GetFont(), fs, ImFloor(ip), c, icon);
-    }
-    if (has_label) {
-        const ImVec2 ls = CalcTextSize(label);
-        ImVec2 lp = o.layout == TabLayout_Stacked ? ImVec2(p.x + (cs.x - ls.x) * 0.5f, p.y + isz.y + (isz.y > 0 ? 4.0f : 0.0f))
-                                                  : ImVec2(p.x + isz.x + (isz.x > 0 ? 8.0f : 0.0f), p.y + (cs.y - ls.y) * 0.5f);
-        dl->AddText(ImFloor(lp), c, label);
+    const TabContent c = MeasureTab(o, icon, label, image);
+    const bool stacked = o.layout == TabLayout_Stacked;
+    const ImVec2 p = ImFloor(ImVec2(center ? bb.Min.x + (bb.GetWidth() - c.total.x) * 0.5f : bb.Min.x + pad_x,
+                                    bb.Min.y + (bb.GetHeight() - c.total.y) * 0.5f));
+    const ImU32 col = Col(color);
+
+    // icon/image: centered above the label when stacked, vertically centered when in a row
+    const ImVec2 icon_pos = stacked ? ImVec2(p.x + (c.total.x - c.icon.x) * 0.5f, p.y) : ImVec2(p.x, p.y + (c.total.y - c.icon.y) * 0.5f);
+    if (image != ImTextureID_Invalid)
+        dl->AddImage(image, icon_pos, icon_pos + c.icon, ImVec2(0, 0), ImVec2(1, 1), o.tint_images ? col : Col(ImVec4(1, 1, 1, 1)));
+    else if (icon && icon[0])
+        dl->AddText(GetFont(), o.icon_size > 0 ? o.icon_size : GetFontSize(), ImFloor(icon_pos), col, icon);
+
+    if (c.has_label) {
+        const float gap = c.icon.x > 0 ? (stacked ? 4.0f : 8.0f) : 0.0f;
+        const ImVec2 label_pos = stacked ? ImVec2(p.x + (c.total.x - c.label.x) * 0.5f, p.y + c.icon.y + gap)
+                                         : ImVec2(p.x + c.icon.x + gap, p.y + (c.total.y - c.label.y) * 0.5f);
+        dl->AddText(ImFloor(label_pos), col, label);
     }
 }
 
@@ -543,8 +559,7 @@ int BeginTabs(const char* id, const char* const labels[], const char* const icon
         float sel_x = 0, sel_w = 0;
         ImVector<float> xs, ws;
         for (int i = 0; i < count; i++) {
-            float iw;
-            float tw = TabContentSize(opt, icon_of(i), labels[i], image_of(i), &iw).x + pad_x * 2;
+            const float tw = MeasureTab(opt, icon_of(i), labels[i], image_of(i)).total.x + pad_x * 2;
             xs.push_back(x); ws.push_back(tw);
             if (i == *selected) { sel_x = x; sel_w = tw; }
             x += tw + (pills ? 6.0f : opt.tab_gap * 0.5f);
@@ -596,7 +611,7 @@ void EndTabs()
     ImGui::PopID();
 }
 
-// ---------------------------------------------------------------- Group
+// ---------------------------------------------------------------- group boxes
 struct GroupState { const char* title; bool border; int title_style; };
 static ImVector<GroupState> g_groups;
 
@@ -673,7 +688,7 @@ void EndGroup()
     EndChild();
 }
 
-// ---------------------------------------------------------------- Text
+// ---------------------------------------------------------------- text
 void TextEx(const char* text, const ImVec4* color, ImFont* font, float size, int align, bool wrap)
 {
     using namespace ImGui;
@@ -693,7 +708,7 @@ void TextEx(const char* text, const ImVec4* color, ImFont* font, float size, int
     PopFont();
 }
 
-// ---------------------------------------------------------------- Fade
+// ---------------------------------------------------------------- window fade
 void PushWindowFade(const char* id)
 {
     float a = AnimateFrom(ImHashStr(id) ^ 0x5eedu, 1.0f, 0.0f, 0.6f);

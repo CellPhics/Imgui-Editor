@@ -1,6 +1,6 @@
 # ImGui Menu Editor
 
-> **Heads up:** this version is built and tested on **Arch Linux + Wayland** (Hyprland). It'll probably
+> **Heads up:** this version is built and tested on **Arch Linux + Wayland**. It'll probably
 > work on other distros, but that's what I'm running. **A Windows version is coming soon.**
 
 I got tired of hand-writing ImGui menus and recompiling every time I wanted to move a slider 4 pixels,
@@ -90,10 +90,20 @@ Needs Dear ImGui 1.92 or newer.
 ## How it's laid out
 
 ```
-src/          the editor itself
-runtime/      mm_widgets: the custom widgets, shared by the editor and the exported code
-data/         templates and the export example
-third_party/  Dear ImGui (docking), nlohmann/json, stb, Font Awesome 6
+src/
+  main.cpp            startup, window, command line options
+  editor*.cpp         the editor UI (core, panels, Claude panel, file dialogs)
+  model.cpp           the menu format: widget types, tree helpers, reading props
+  renderer.cpp        draws a menu straight from the JSON (the canvas)
+  exporter.cpp        turns a menu into C++
+  theme.cpp           themes and presets
+  assets.cpp          fonts, images, icons
+  bridge.cpp          talks to Claude Code
+  tools.cpp           the `tool` command line helpers
+  util.cpp            file/shell/string bits
+runtime/              mm_widgets: the custom widgets, shared by the editor and the exported code
+data/                 templates and the export example
+third_party/          Dear ImGui (docking), nlohmann/json, stb, Font Awesome 6
 ```
 
 Each menu project is just a folder with `menu.json` (the whole design), an `assets/` folder and a

@@ -1,56 +1,58 @@
-// Draws a menu document live (the editor preview), interpreting the JSON
-// with the same mm:: widgets the exporter emits.
+// Draws a menu straight from the JSON. This is what you see on the canvas.
+// It calls the exact same mm:: widgets the exported C++ calls, so the preview
+// and the real thing can't drift apart.
 #pragma once
 #include "assets.h"
-#include "model.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "model.h"
 #include <map>
 #include <string>
 
+// Runtime value for one widget while you play with it in the preview.
 struct PreviewValue {
-    std::string sig;
+    std::string signature; // changes when the widget's default changes -> reset the value
     bool b = false;
     int i = 0;
     float f = 0;
-    float col[4] = {1, 1, 1, 1};
+    float color[4] = {1, 1, 1, 1};
     int key = 0;
     bool flags[64] = {};
     std::vector<char> text;
 };
 
-struct PreviewCtx {
-    // inputs
-    bool edit_mode = true;
+struct PreviewState {
+    // set by the editor
+    bool edit_mode = true;           // clicks select stuff instead of only using it
     std::string selected;
-    bool selection_changed = false; // switch tabs to reveal the selection
+    bool selection_changed = false;  // switch tabs so the selection is visible
     bool reset_values = false;
-    ImVec2 origin;                  // canvas top-left in screen space
+    ImVec2 origin;                   // canvas top-left in screen space
 
-    // outputs (per frame)
+    // filled in every frame
     std::string hovered;
     std::string clicked;
-    bool doc_changed = false;       // window moved / resized by mouse
+    bool doc_changed = false;        // a window got dragged or resized
     struct Hit { ImRect rect, clip; };
     std::map<std::string, Hit> rects;
 
-    // persistent runtime state
+    // kept between frames
     std::map<std::string, PreviewValue> values;
-    std::map<std::string, int> tab_sel;
+    std::map<std::string, int> selected_tab;
     std::map<std::string, ImVec2> applied_pos, applied_size;
 };
 
-void RenderPreview(json& doc, Assets& assets, PreviewCtx& ctx);
-void DrawSelectionOverlay(const PreviewCtx& ctx, ImU32 accent);
+void RenderPreview(json& doc, Assets& assets, PreviewState& state);
+void DrawSelectionOverlay(const PreviewState& state, ImU32 color);
 
+// ImGuiKey <-> the names we store in JSON ("F", "Insert", "MouseX1"...).
 int KeyFromName(const std::string& name);
 std::string KeyName(int key);
 
-// Safe JSON getters.
-float       JF(const json& n, const char* k, float d);
-int         JI(const json& n, const char* k, int d);
-bool        JB(const json& n, const char* k, bool d);
-std::string JS(const json& n, const char* k, const std::string& d = "");
-ImVec2      JV2(const json& n, const char* k, ImVec2 d);
-bool        JCol(const json& n, const char* k, ImVec4& out);
-std::vector<std::string> JItems(const json& n, const char* k);
+// String props -> mm:: enum values. Shared with the exporter.
+int CheckboxLook(const json& n);
+int SliderLook(const json& n);
+int GroupTitleStyle(const json& n);
+int TabsStyle(const json& n);
+int TabHighlight(const json& n);
+int TextAlign(const json& n); // 0 left, 1 center, 2 right
